@@ -1,0 +1,580 @@
+```{r}
+library(phyloseq)
+library(microbiome)
+library(microbiomeutilities)
+library(microViz)
+
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(ggpubr)
+library(ggbreak)
+
+library(ANCOMBC)
+library(Maaslin2)
+
+library(DT)
+```
+
+```{r}
+# metadata
+meta_df <- read.csv("data/alternative/subset.csv", sep = ",", header = TRUE)
+rownames(meta_df) <- meta_df$SRA_ID
+meta_df$Group <- as.factor(meta_df$Group)
+head(meta_df)
+
+summary(meta_df$Group)
+meta_df <- meta_df[, c("BioProject", "SRA_ID", "Group")]
+
+sampledata <- sample_data(meta_df)
+sample_names(sampledata) <- meta_df$SRA_ID
+head(sampledata)
+
+# count table
+abs_count_df <- read.csv(
+  "data/alternative/absolute_count_raw.csv",
+  sep = ",",
+  header = TRUE
+)
+rownames(abs_count_df) <- abs_count_df$query_name
+abs_count_df <- subset(abs_count_df, select = -query_name)
+otu <- otu_table(as.matrix(t(abs_count_df)), taxa_are_rows = TRUE)
+
+# asv table
+taxa_df <- read.csv("data/alternative/tax_table.csv", sep = "\t", header = TRUE)
+rownames(taxa_df) <- taxa_df$Ident
+taxa_df <- subset(taxa_df, select = -c(Ident, X, Gtdb_representative))
+head(taxa_df)
+
+tax <- tax_table(as.matrix(taxa_df))
+```
+
+```{r}
+physeq <- phyloseq(otu, tax, sampledata)
+```
+
+# Remove singleton
+```{r}
+#sort sample total reads, prune taxa
+all.ps <- phyloseq::prune_taxa(phyloseq::taxa_sums(physeq) > 0, physeq)
+
+#explore singleton
+all.tx.pres <- rowSums(abundances(all.ps) > 0)
+all.singleton <- as.vector(
+  as.matrix(
+    tax_table(all.ps)[names(which(all.tx.pres == 1)), "Genus"]
+  )
+)
+all.singleton
+
+names(all.singleton) <- rownames(
+  tax_table(all.ps)[names(which(all.tx.pres == 1)), "Genus"]
+)
+sort(table(all.singleton),
+     decreasing = TRUE)
+
+## most common singleton taxa are
+
+#counts of each singleton taxa
+sort(taxa_sums(all.ps)[names(all.singleton)], decreasing = TRUE)
+summary(taxa_sums(all.ps)[names(all.singleton)]) #med 46.5//3rd 1397.5
+
+table(
+  all.singleton[names(which(taxa_sums(all.ps)[names(all.singleton)] < 1397.5))]
+)
+all.taxa.rm <- names(which(taxa_sums(all.ps)[names(all.singleton)] < 1397.5))
+
+## Remove singleton taxa that have read abundance < 2208 reads
+all.fil <- prune_taxa(!(taxa_names(all.ps) %in% all.taxa.rm), all.ps)
+all.fil #762 taxa
+summary(sample_sums(all.fil) / sample_sums(all.ps)) #median 99.80%
+```
+
+```{r}
+# standard error
+se <- function(x) sd(x) / sqrt(length(x))
+```
+
+# Species - Biomarkers
+```{r}
+# transform to relative abundance
+abund_df <- microbiomeutilities::phy_to_ldf(
+  all.fil,
+  transform.counts = "compositional"
+)
+```
+# A-div
+```{r}
+adiv <- data.frame(
+  "Shannon" = phyloseq::estimate_richness(all.fil, measures = "Shannon"),
+  "Simpson" = phyloseq::estimate_richness(all.fil, measures = "Simpson"),
+  "Chao1" = phyloseq::estimate_richness(all.fil, measures = "Chao1"),
+  "Group" = sample_data(all.fil)$Group
+)
+
+adiv <- subset(adiv, select = -Chao1.se.chao1)
+names(adiv)[3] <- "Chao1"
+
+adiv$Group <- as.factor(adiv$Group)
+
+# plot
+
+ggplot(adiv, aes(Group, Chao1)) +
+  geom_violin() +
+  geom_boxplot(width = 0.5) +
+  # geom_jitter() +
+  stat_compare_means(
+    method = "wilcox.test",
+    paired = FALSE
+  )
+```
+# Tukey post hoc test
+```{r}
+adiv
+#Shannon
+shan_div <- adiv[, c("Shannon", "Group")]
+tukey_shan <- TukeyHSD(aov(lm(Shannon ~ Group,
+                              shan_div)))$Group
+tukey_shan <- as.data.frame(tukey_shan)
+
+tukey_shan[order(tukey_shan$`p adj`), ]
+
+#Simpson
+simp_div <- adiv[, c("Simpson", "Group")]
+tukey_simp <- TukeyHSD(aov(lm(Simpson ~ Group,
+                              simp_div)))$Group
+tukey_simp <- as.data.frame(tukey_simp)
+
+tukey_simp[order(tukey_simp$`p adj`), ]
+
+#Chao1
+chao1_div <- adiv[, c("Chao1", "Group")]
+tukey_chao1 <- TukeyHSD(aov(lm(Chao1 ~ Group,
+                               chao1_div)))$Group
+tukey_chao1 <- as.data.frame(tukey_chao1)
+
+tukey_chao1[order(tukey_chao1$`p adj`), ]
+```
+
+# PCoA
+```{r}
+ord <- ordinate(all.fil, "PCoA", "jaccard")
+
+#Plot scree plot
+phyloseq::plot_scree(ord) +
+  geom_bar(stat = "identity", fill = "firebrick") +
+  scale_x_discrete(limits = c(1:10)) +
+  labs(x = "Axis", y = "Proportion of Variance")
+
+plot_ordination(all.fil, ord,
+  type = "samples",
+  color = "Group", axes = 1:3
+) + stat_ellipse()
+```
+
+# Phylum
+```{r}
+ps_phylum <- microbiome::aggregate_rare(all.fil,
+  level = "Phylum",
+  detection = 0.1,
+  prevalence = 0
+)
+
+ggplot(abund_df, aes(x = Sam_rep, y = Abundance, fill = Phylum)) +
+  geom_bar(position = "fill",
+    stat = "identity"
+  )
+
+
+
+top_phylum <- abund_df %>%
+  group_by(Phylum) %>%
+  summarise(mean_abundance = mean(Abundance),
+            se = se(Abundance),
+            median = median(Abundance),
+            q1 = quantile(Abundance)[2],
+            q3 = quantile(Abundance)[4]) %>%
+  ungroup()
+
+top_phylum <- top_phylum %>% arrange(desc(mean_abundance))
+top_phylum <- as.data.frame(top_phylum)
+top_phyla <- head(top_phylum$Phylum, n = 10)
+
+
+abund_df <- abund_df %>%
+  dplyr::mutate(pick_Phylum = ifelse(Phylum %in%
+                                       top_phyla,
+                                     yes = Phylum,
+                                     "Others"))
+
+# Plot
+abund_df$pick_Phylum <- as.factor(abund_df$pick_Phylum)
+abund_df$pick_Phylum <- factor(abund_df$pick_Phylum,
+  levels = c(top_phyla, "Others")
+)
+
+(abund_plot <-
+    ggplot(abund_df, aes(x = Sam_rep, y = Abundance, fill = pick_Phylum)) +
+    geom_bar(position = "fill", stat = "identity") +
+    theme_classic() +
+    scale_y_continuous(expand = c(0, 0)) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5)) +
+    facet_wrap(. ~ Group)
+)
+```
+
+```{r}
+library(DirichletMultinomial)
+library(reshape2)
+library(magrittr)
+
+
+pseq_comp <- microbiome::transform(all.fil, "compositional")
+pseq_prune <- microbiome::aggregate_rare(pseq_comp,
+  level = "Genus",
+  detection = 0.001,
+  prevalence = 0.3
+)
+
+# taxa <- core_members(pseq_comp,
+#                      detection = 0.001,
+#                      prevalence = 0.1)
+# all.prune <- prune_taxa(taxa, all.fil)
+
+# Pick the OTU count matrix
+# and convert it into samples x taxa format
+dat <- abundances(pseq_prune)
+count <- as.matrix(t(dat))
+
+# fit model
+fit <- lapply(1:10, dmn, count = count, verbose = TRUE)
+lplc <- base::sapply(fit, DirichletMultinomial::laplace) # AIC / BIC / Laplace
+aic  <- base::sapply(fit, DirichletMultinomial::AIC) # AIC / BIC / Laplace
+bic  <- base::sapply(fit, DirichletMultinomial::BIC) # AIC / BIC / Laplace
+
+best <- fit[[which.min(unlist(lplc))]]
+
+ass <- apply(mixture(best), 1, which.max)
+ass
+
+# visualization
+for (k in seq(ncol(fitted(best)))) {
+  d <- melt(fitted(best))
+  colnames(d) <- c("OTU", "cluster", "value")
+  d <- subset(d, cluster == k) %>%
+     # Arrange OTUs by assignment strength
+     arrange(value) %>%
+     mutate(OTU = factor(OTU, levels = unique(OTU))) %>%
+     # Only show the most important drivers
+     filter(abs(value) > quantile(abs(value), 0.8))     
+
+  p <- ggplot(d, aes(x = OTU, y = value)) +
+       geom_bar(stat = "identity") +
+       coord_flip() +
+       labs(title = paste("Top drivers: community type", k))
+  print(p)
+}
+```
+
+```{r}
+dist <- phyloseq::distance(all.fil, "jaccard")
+#Colors
+CSTcolors <- scale_fill_manual(values = c("#6388B4",
+                                          "#FFAE34",
+                                          "#EF6F6A",
+                                          "#8CC2CA",
+                                          "#55AD89"))
+CSTcolors.value <- c("#6388B4",
+                     "#FFAE34",
+                     "#EF6F6A",
+                     "#8CC2CA",
+                     "#55AD89")
+
+#Clustering
+hclust.all <- hclust(dist, method = "average")
+
+hc <- as.dendrogram(hclust.all)
+cut3 <- cutree(hclust.all, k = 3)
+cut4 <- cutree(hclust.all, k = 4)
+
+plot(hc)
+
+#visualize dendrogram
+temp_col <- CSTcolors.value[as.numeric(cut4)]
+temp_col <- temp_col[order.dendrogram(hc)]
+temp_col <- factor(temp_col, unique(temp_col))
+
+
+hc %>% dendextend::color_branches(clusters = as.numeric(temp_col), col = levels(temp_col), groupLabels = T) %>%
+  plot() + legend("topleft", legend = c(1:3), fill = CSTcolors.value)
+
+sample_data(all.norm)$CST <- as.factor(cut3)
+
+(ord_plot.cst <- phyloseq::plot_ordination(all.fil, ord_all, axes = c(1,2), type="samples", color = 'CST') + 
+  geom_point(size = 1) +
+  labs(subtitle = "Aitchison Distance // hclust 3 CSTs")  +
+  stat_ellipse() + scale_color_manual(values = CSTcolors.value) +
+  theme_pubr())
+
+#Other clustering method
+asw.y <- pamk(dist, krange=2:10, criterion="asw", diss=TRUE,ns=10, critout = TRUE) #3 or 4 clusters
+BS.y <- nselectboot(dist, B = 50, clustermethod = pamkCBI, classification = "averagedist", krange=2:10) # 4 
+ps <- prediction.strength(ord$vectors, Gmin = 2, Gmax = 10, M = 50, clustermethod = pamkCBI, cutoff=0.60) #3
+```
+
+```{r}
+## update on heatmap plot functions
+make_hcb <- function(data, var, name = NULL, fill_scale = NULL, ...) {
+  hcb <- ggplot(data = data, aes_string(x = "index", y = 1, fill = var)) +
+    geom_raster(show.legend = TRUE) +
+    scale_y_continuous(expand = c(0, 0), breaks = 1, labels = name) +
+    scale_x_continuous(expand = c(0, 0)) +
+    xlab(NULL) + ylab(NULL) +
+    theme(axis.title = element_blank(), axis.ticks = element_blank()) +
+    theme(axis.text.x = element_blank()) +
+    theme(axis.text.y = element_text(size = 12, face = "bold")) +
+    theme(plot.margin = unit(c(0, 0, 0, 0), "lines")) +
+    guides(fill = FALSE)
+  if (!is.null(fill_scale)) hcb <- hcb + fill_scale
+  return(hcb)
+}
+
+mush <- function(hmap, hcbs) {
+  require(gtable)
+  require(grid)
+  require(gridExtra)
+  cbgs <- lapply(hcbs, ggplotGrob)
+  hmg <- ggplotGrob(hmap)
+  # Make sure both plots have the same dimensions in grob objects
+  for (i in seq_along(cbgs)) {
+    cbgs[[i]] <- gtable_add_cols(cbgs[[i]], widths = unit(1, "null"), pos = 8)
+    cbgs[[i]] <- gtable_add_cols(cbgs[[i]], widths = unit(1, "null"), pos = 8)
+  }
+  ## Make sure that both plots have the same widths
+  cbwidths <- lapply(cbgs, function(x) x$widths)
+  maxwidth <- do.call(unit.pmax, cbwidths)
+  maxwidth <- unit.pmax(hmg$widths, maxwidth)
+  ## replace widths in each grob object with maxWidth
+  hmg$widths <- maxwidth
+  for (i in seq_along(cbgs)){
+    cbgs[[i]]$widths <- maxwidth
+  }
+  heights <- unit.c(unit(rep(1, length(cbgs)), "lines"), unit(1, "null"))
+  rval <- do.call(arrangeGrob,
+                  args = c(cbgs,
+                           list(hmg),
+                           ncol = 1,
+                           heights = list(heights)))
+  return(rval)
+}
+```
+
+# heatmap 
+```{r}
+#top_genus
+genus_ps <- tax_glom(all.fil, "Genus")
+genus_abund <- transform_sample_counts(genus_ps, function(otu) otu / sum(otu))
+top_genus <- top_taxa(genus_abund, 20)
+top_genus_ps <- prune_taxa(top_genus, genus_abund)
+
+taxa_order <- names(sort(taxa_sums(top_genus_ps)))
+sample_order <- rownames(
+  sample_data(top_genus_ps)[order(sample_data(top_genus_ps)$Group)]
+)
+
+(hm <- plot_heatmap(top_genus_ps,
+                    taxa.label = "Genus",
+                    sample.order = sample_order,
+                    taxa_order = taxa_order) +
+    # geom_tile(color = "white", size = 0.05) +
+    scale_fill_viridis_b(values = c(0, 0.25, 0.5, 0.75, 1),
+                         na.value = NA,
+                         guide = "colourbar",
+                         name = "Relative\nabundance") +
+    theme_void() +
+    theme(axis.text.x = element_text(size = 15,
+                                     color = "grey10",
+                                     angle = 45,
+                                     hjust = 1),
+      axis.text.y = element_text(face = "italic",
+                                 size = 15,
+                                 color = "grey10",
+                                 hjust = 1),
+      axis.title = element_blank(),
+      axis.ticks.x = element_blank(),
+      plot.margin = unit(c(0.1, 0.1, 0.1, 0.1), "in")
+    )
+)
+
+hcbdf <- data.frame(sample_data(top_genus_ps))[sample_order, ]
+hcbdf$index <- seq(1, phyloseq::nsamples(top_genus_ps))
+hcb <- make_hcb(hcbdf,
+                "Group",
+                name = "Group",
+                colorScale = scale_color_manual(values = c("#ef476f",
+                                                           "#ffd166")))
+hcb <- hcb +
+  annotate("text",
+           x = tapply(hcbdf$index,
+                      hcbdf[, "Group", drop = TRUE],
+                      mean),
+           y = 1,
+           label = levels(hcbdf[, "Group", drop = TRUE]),
+           size = 4,
+           color = "white")
+
+big_hm <- mush(hm, list(hcb))
+big_heatmap <- plot(ggarrange(big_hm))
+
+ggplot2::ggsave(filename = "Heatmap_genus.pdf",
+                plot = big_heatmap,
+                device = "pdf",
+                path = "data/results/",
+                width = 10,
+                height = 10,
+                units = "in",
+                dpi = "retina",
+                limitsize = TRUE,
+                bg = "white")
+```
+
+# Differential abundance
+```{r}
+mas <- Maaslin2(
+  input_data = data.frame(otu_table(all.fil)),
+  input_metadata = data.frame(sample_data(all.fil)),
+  output = "output/",
+  min_abundance = 0,
+  min_prevalence = 0,
+  normalization = "NONE",
+  transform = "LOG",
+  analysis_method = "LM",
+  fixed_effects = "Group",
+  reference = "SRA_ID",
+  plot_heatmap = FALSE,
+  plot_scatter = FALSE,
+  standardize = FALSE,
+  cores = 22
+)
+
+dfmas_res <- mas$results
+
+fdr_mas <- dfmas_res
+
+fdr_mas$Species <-  phyloseq::tax_table(all.fil)[fdr_mas$feature, "Species"]
+
+dim(fdr_mas) #6668 species
+head(fdr_mas[order(fdr_mas$coef, decreasing = TRUE), ], n = 50)
+
+fc_mas <- exp(fdr_mas$coef) ## Antilog coef
+fdr_mas$log2FoldChange <- log2(fc_mas)
+rownames(fdr_mas) <- fdr_mas$feature
+
+fdr_mas$Species <- as.character(unclass(fdr_mas$Species))
+```
+
+# ANCOMBC
+```{r}
+all.ps
+#----------#
+# Ancombc2
+ancom <- ancombc2(data = all.fil, assay_name = "counts",
+                  tax_level = "Genus",
+                  fix_formula = "Group",
+                  rand_formula = NULL,
+                  p_adj_method = "fdr", pseudo_sens = TRUE,
+                  prv_cut = 0.001, lib_cut = 1000, s0_perc = 0.05,
+                  group = "Group",
+                  struc_zero = TRUE, neg_lb = TRUE,
+                  alpha = 0.05, n_cl = 2, verbose = TRUE,
+                  global = FALSE, pairwise = FALSE,
+                  dunnet = FALSE, trend = FALSE,
+                  iter_control = list(tol = 1e-2, max_iter = 20,
+                                      verbose = TRUE),
+                  em_control = list(tol = 1e-5, max_iter = 100),
+                  lme_control = lme4::lmerControl(),
+                  mdfdr_control = list(fwer_ctrl_method = "holm", B = 100),
+                  trend_control = list(contrast = list(matrix(c(1, 0, -1, 1),
+                                                              nrow = 2,
+                                                              byrow = TRUE),
+                                                       matrix(c(-1, 0, 1, -1),
+                                                              nrow = 2,
+                                                              byrow = TRUE),
+                                                       matrix(c(1, 0, 1, -1),
+                                                              nrow = 2,
+                                                              byrow = TRUE)),
+                                       node = list(2, 2, 1),
+                                       solver = "ECOS",
+                                       B = 10))
+
+tab_zero <- ancom$zero_ind
+tab_zero %>%
+  datatable(caption = "The detection of structural zeros")
+
+res_prim <- ancom$res
+res_prim %>%
+  datatable(caption = "Result ANCOMBC2")
+write.csv(res_prim, file = "ancombc.csv")
+```
+
+# Data visualization
+## Prepare dataframe
+
+```{r}
+colnames(res_prim) <- gsub("\\(Intercept\\)", "value", colnames(res_prim))
+
+volcano <- ggplot(res_prim, aes(x = lfc_value,
+                                y = -log10(q_value),
+                                taxon = taxon)) +
+  geom_hline(aes(yintercept = max(-log10(q_value))),
+             linetype = "dashed",
+             color = "grey30") +
+  geom_point(data = subset(res_prim, q_value > 0.05),
+             size = 3, color = "grey30") +
+  geom_point(data = subset(res_prim, q_value <= 0.05 & lfc_value < 0),
+             size = 3, color = "#457b9d") +
+  geom_point(data = subset(res_prim, q_value <= 0.05 & lfc_value > 0),
+             size = 3, color = "#d62828") +
+  geom_hline(yintercept = -log10(0.05), col = "grey30",
+             linetype = 1) +
+  geom_vline(xintercept = 0, col = "grey30",
+             linetype = 1) +
+  geom_text(aes(x = 3, y = -log10(0.03), label = "q-value = 0.05"),
+            hjust = 1, vjust = 0,
+            color = "grey30",
+            size = 5) +
+  # scale_y_continuous(expand = c(0, 0), limits = c(0, 15)) +
+  scale_x_continuous(expand = c(0, 0), limits = c(-4, 4))  +
+  theme_classic() +
+  labs(title = "Differential abundance",
+       subtitle = "") +
+  theme(plot.title = element_text(size = 10, face = "bold",
+                                  vjust = 0, hjust = 0),
+        plot.subtitle = element_text(size = 10,
+                                     color = "grey50",
+                                     vjust = 0, hjust = 0),
+        axis.title.x = element_text(vjust = 0, hjust = 0.5, size = 10),
+        axis.text.x = element_text(size = 10),
+        axis.title.y = element_text(size = 10),
+        axis.text.y = element_text(size = 10),
+        axis.line.y.left = element_blank()) +
+  geom_segment(aes(x = -4, y = -Inf,
+                   xend = -4, yend = max(-log10(q_value))),
+               size = 1, linetype = "solid") +
+  geom_segment(aes(x = -4, y = max(-log10(q_value)),
+                   xend = -4, yend = Inf),
+               size = 1, linetype = "dotted")
+
+ggplot2::ggsave(filename = "DA_Genus.png",
+                plot = volcano,
+                device = "png",
+                path = "data/results/",
+                width = 7,
+                height = 7,
+                units = "in",
+                dpi = "retina",
+                limitsize = TRUE,
+                bg = "white")
+
+ggplotly(volcano)
+```
