@@ -224,105 +224,6 @@ abund_df$pick_Phylum <- factor(abund_df$pick_Phylum,
 ```
 
 ```{r}
-library(DirichletMultinomial)
-library(reshape2)
-library(magrittr)
-
-
-pseq_comp <- microbiome::transform(all.fil, "compositional")
-pseq_prune <- microbiome::aggregate_rare(pseq_comp,
-  level = "Genus",
-  detection = 0.001,
-  prevalence = 0.3
-)
-
-# taxa <- core_members(pseq_comp,
-#                      detection = 0.001,
-#                      prevalence = 0.1)
-# all.prune <- prune_taxa(taxa, all.fil)
-
-# Pick the OTU count matrix
-# and convert it into samples x taxa format
-dat <- abundances(pseq_prune)
-count <- as.matrix(t(dat))
-
-# fit model
-fit <- lapply(1:10, dmn, count = count, verbose = TRUE)
-lplc <- base::sapply(fit, DirichletMultinomial::laplace) # AIC / BIC / Laplace
-aic  <- base::sapply(fit, DirichletMultinomial::AIC) # AIC / BIC / Laplace
-bic  <- base::sapply(fit, DirichletMultinomial::BIC) # AIC / BIC / Laplace
-
-best <- fit[[which.min(unlist(lplc))]]
-
-ass <- apply(mixture(best), 1, which.max)
-ass
-
-# visualization
-for (k in seq(ncol(fitted(best)))) {
-  d <- melt(fitted(best))
-  colnames(d) <- c("OTU", "cluster", "value")
-  d <- subset(d, cluster == k) %>%
-     # Arrange OTUs by assignment strength
-     arrange(value) %>%
-     mutate(OTU = factor(OTU, levels = unique(OTU))) %>%
-     # Only show the most important drivers
-     filter(abs(value) > quantile(abs(value), 0.8))     
-
-  p <- ggplot(d, aes(x = OTU, y = value)) +
-       geom_bar(stat = "identity") +
-       coord_flip() +
-       labs(title = paste("Top drivers: community type", k))
-  print(p)
-}
-```
-
-```{r}
-dist <- phyloseq::distance(all.fil, "jaccard")
-#Colors
-CSTcolors <- scale_fill_manual(values = c("#6388B4",
-                                          "#FFAE34",
-                                          "#EF6F6A",
-                                          "#8CC2CA",
-                                          "#55AD89"))
-CSTcolors.value <- c("#6388B4",
-                     "#FFAE34",
-                     "#EF6F6A",
-                     "#8CC2CA",
-                     "#55AD89")
-
-#Clustering
-hclust.all <- hclust(dist, method = "average")
-
-hc <- as.dendrogram(hclust.all)
-cut3 <- cutree(hclust.all, k = 3)
-cut4 <- cutree(hclust.all, k = 4)
-
-plot(hc)
-
-#visualize dendrogram
-temp_col <- CSTcolors.value[as.numeric(cut4)]
-temp_col <- temp_col[order.dendrogram(hc)]
-temp_col <- factor(temp_col, unique(temp_col))
-
-
-hc %>% dendextend::color_branches(clusters = as.numeric(temp_col), col = levels(temp_col), groupLabels = T) %>%
-  plot() + legend("topleft", legend = c(1:3), fill = CSTcolors.value)
-
-sample_data(all.norm)$CST <- as.factor(cut3)
-
-(ord_plot.cst <- phyloseq::plot_ordination(all.fil, ord_all, axes = c(1,2), type="samples", color = 'CST') + 
-  geom_point(size = 1) +
-  labs(subtitle = "Aitchison Distance // hclust 3 CSTs")  +
-  stat_ellipse() + scale_color_manual(values = CSTcolors.value) +
-  theme_pubr())
-
-#Other clustering method
-asw.y <- pamk(dist, krange=2:10, criterion="asw", diss=TRUE,ns=10, critout = TRUE) #3 or 4 clusters
-BS.y <- nselectboot(dist, B = 50, clustermethod = pamkCBI, classification = "averagedist", krange=2:10) # 4 
-ps <- prediction.strength(ord$vectors, Gmin = 2, Gmax = 10, M = 50, clustermethod = pamkCBI, cutoff=0.60) #3
-```
-
-```{r}
 ## update on heatmap plot functions
 make_hcb <- function(data, var, name = NULL, fill_scale = NULL, ...) {
   hcb <- ggplot(data = data, aes_string(x = "index", y = 1, fill = var)) +
@@ -368,27 +269,70 @@ mush <- function(hmap, hcbs) {
   return(rval)
 }
 ```
-
 # heatmap 
 ```{r}
 #top_genus
 genus_ps <- tax_glom(all.fil, "Genus")
 genus_abund <- transform_sample_counts(genus_ps, function(otu) otu / sum(otu))
-top_genus <- top_taxa(genus_abund, 20)
+top_genus <- top_taxa(genus_abund, 50)
 top_genus_ps <- prune_taxa(top_genus, genus_abund)
 
 taxa_order <- names(sort(taxa_sums(top_genus_ps)))
+
+#keep interest taxa
+
+pop_taxa <- function(physeq, picktaxa) {
+  alltaxa <- taxa_names(physeq)
+  alltaxa <- alltaxa[(alltaxa %in% picktaxa)]
+  return(prune_taxa(alltaxa, physeq)) # nolint: object_usage_linter.
+}
+
+
+etb <- c("GCA_003463775.1", #g__Bacteroides
+  "GCA_002361135.1", #g__Parabacteroides
+  "GCA_003603075.1", #g__Phocaeicola
+  "GCA_000435835.1", #g__Clostridium
+  "GCA_002556665.1", #g__Clostridium_A
+  "GCA_003343785.1", #g__Slackia_A
+  "GCA_003543095.1",  #g__Roseburia
+  "GCA_003541715.1"  #g__Catenibacterium
+)
+
+etp <- c("GCA_000436915.1", #g__Prevotella
+  "GCA_000434455.1", #g__Alloprevotella
+  "GCA_001917195.1", #g__Desulfovibrio
+  "GCA_003464005.1" #g__Veillonella
+)
+
+etf <- c("GCA_000980515.1", #g__Akkermansia
+"GCA_003438585.1", #g__Ruminococcus_B
+"GCA_000980235.1", #g__Ruminococcus_C
+"GCA_001917015.1", #g__Ruminococcus_D
+"GCA_000436775.1", #g__Ruminococcus_E
+"GCA_000438435.1", #g__Ruminococcus
+"GCA_001406615.2", #g__Alistipes_A
+"GCA_003434565.1", #g__Blautia
+"GCA_003481625.1", #g__Blautia_A
+"GCA_003527765.1" #g__Dialister
+)
+
+genera_to_keep <- c(etb, etp, etf)
+
+top_genus_fil <- pop_taxa(top_genus_ps, genera_to_keep)
+
 sample_order <- rownames(
   sample_data(top_genus_ps)[order(sample_data(top_genus_ps)$Group)]
 )
 
-(hm <- plot_heatmap(top_genus_ps,
+(hm <- plot_heatmap(top_genus_fil,
                     taxa.label = "Genus",
                     sample.order = sample_order,
                     taxa_order = taxa_order) +
     # geom_tile(color = "white", size = 0.05) +
-    scale_fill_viridis_b(values = c(0, 0.25, 0.5, 0.75, 1),
-                         na.value = NA,
+    scale_fill_viridis_b(values = c(0, 0.1, 0.2, 0.6, 1),
+                         breaks = c(0, 0.1, 0.2, 0.6, 1),
+                         na.value = "#3d0242",
+                        #  trans = "log",
                          guide = "colourbar",
                          name = "Relative\nabundance") +
     theme_void() +
@@ -425,6 +369,7 @@ hcb <- hcb +
 
 big_hm <- mush(hm, list(hcb))
 big_heatmap <- plot(ggarrange(big_hm))
+big_heatmap
 
 ggplot2::ggsave(filename = "Heatmap_genus.pdf",
                 plot = big_heatmap,
@@ -438,6 +383,97 @@ ggplot2::ggsave(filename = "Heatmap_genus.pdf",
                 bg = "white")
 ```
 
+
+```{r}
+genus_fil <- pop_taxa(genus_abund, genera_to_keep)
+
+genus_df <- microbiomeutilities::phy_to_ldf(genus_fil,
+                                            NULL)
+
+top_genus_df <- genus_df
+
+genus_df <- top_genus_df %>%
+  select(OTUID, Genus, Abundance, SRA_ID, Group)
+genus_df <- top_genus_df %>%
+  mutate(Group = factor(Group, levels = c("Athlete",
+                                          "Sedentary",
+                                          "Overweight",
+                                          "Obesity")))
+
+merged_df <- top_genus_df %>%
+  mutate(Enterotype = ifelse(OTUID %in% etb,
+                             "ETB",
+                             ifelse(OTUID %in% etp,
+                                    "ETP", "ETF"))) %>%
+  group_by(OTUID, Genus, Enterotype, SRA_ID, Group) %>%
+  summarise(Abundance = sum(Abundance), .groups = "drop") %>%
+  as.data.frame()
+
+merged_2 <- merged_df %>%
+  group_by(Enterotype, SRA_ID, Group) %>%
+  summarise(Abundance= sum(Abundance)) %>%
+  as.data.frame()
+
+merged_df$Enterotype <- as.factor(merged_df$Enterotype)
+
+
+(box_plot <- ggplot(merged_2,
+                    aes(x = factor(Group, levels = c("Athlete", "Sedentary", "Overweight", "Obesity")), y = Abundance)) +
+    geom_boxplot(alpha = 0.5) +
+    # geom_jitter() +
+    facet_wrap(. ~ Enterotype, nrow = 1) +
+    # scale_y_log10() +
+    theme_pubr() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+)
+
+
+# Step 1: Calculate total abundance for each SRA_ID
+total_abundance <- merged_2 %>%
+  group_by(SRA_ID) %>%
+  summarise(total = sum(Abundance, na.rm = TRUE))
+
+# Step 2: Reorder SRA_ID based on total abundance
+merged_2 <- merged_2 %>%
+  mutate(SRA_ID = factor(SRA_ID, levels = total_abundance$SRA_ID[order(total_abundance$total, decreasing = TRUE)]))
+
+
+(bar_plot <- ggplot(merged_2) +
+    geom_col(aes(" ", Abundance,
+                 group = Enterotype,
+                 fill = Enterotype),
+             color = NA) +
+    scale_fill_manual(values = c("#edae49",
+                                 "#d1495b",
+                                 "#00798c")) +
+    coord_polar("y", start = 0) +
+    facet_wrap(Group ~ SRA_ID,
+               nrow = 4) +
+    theme_void()
+)
+
+ggplot2::ggsave(filename = "Box.pdf",
+                plot = box_plot,
+                device = "pdf",
+                path = "data/results/",
+                width = 30,
+                height = 10,
+                units = "in",
+                dpi = "retina",
+                limitsize = TRUE,
+                bg = "white")
+
+ggplot2::ggsave(filename = "Pie.pdf",
+                plot = bar_plot,
+                device = "pdf",
+                path = "data/results/",
+                width = 30,
+                height = 10,
+                units = "in",
+                dpi = "retina",
+                limitsize = TRUE,
+                bg = "white")
+```
 # Differential abundance
 ```{r}
 mas <- Maaslin2(
